@@ -1,0 +1,103 @@
+-- Kroger and Meijer Upc  
+
+Client_18_UPC_Meijer
+clientupc_kroger
+
+
+CREATE PROCEDURE QA_directed_list_scrapes
+    @clientupc_table NVARCHAR(50),
+    @backup_table_date_1 NVARCHAR(50),
+    @backup_table_date_2 NVARCHAR(50)
+AS
+BEGIN
+    DECLARE @sql NVARCHAR(MAX);
+
+    SET @sql = '
+    WITH Upc_present_not_present AS (
+        SELECT 
+            Job_number,
+            zip,
+            extra1,
+            COUNT(DISTINCT upc) AS Present,
+            (SELECT COUNT(DISTINCT upc) FROM ' + @clientupc_table + ') - COUNT(DISTINCT upc) AS Not_Present
+        FROM 
+            ' + QUOTENAME(@backup_table_date_1) + '
+        WHERE 
+            upc IN (SELECT DISTINCT upc FROM ' + @clientupc_table + ')
+        GROUP BY 
+            Job_number, zip, extra1
+    ),
+    Upc_not_present_list AS (
+        SELECT 
+            a.Job_number,
+            a.zip,
+            a.extra1,
+            COALESCE(STUFF((
+                SELECT '','' + b.upc  
+                FROM ' + @clientupc_table + ' AS b 
+                WHERE NOT EXISTS (
+                    SELECT 1 
+                    FROM ' + QUOTENAME(@backup_table_date_1) + ' AS c 
+                    WHERE c.upc = b.upc
+                    AND c.Job_number = a.Job_number
+                    AND c.zip = a.zip
+                    AND c.extra1 = a.extra1
+                )
+                FOR XML PATH(''''), TYPE).value(''.'', ''VARCHAR(MAX)''), 1, 1, ''''), '''') AS Upcs_not_present 
+        FROM 
+            (SELECT DISTINCT Job_number, zip, extra1 FROM ' + QUOTENAME(@backup_table_date_1) + ') a
+    ),
+    Upc_previous_file AS (
+        SELECT
+            Job_number,
+            zip,
+            extra1,
+            COUNT(DISTINCT upc) AS Upcs_previous_file
+        FROM 
+            ' + QUOTENAME(@backup_table_date_2) + '
+        GROUP BY 
+            Job_number, zip, extra1
+    ),
+    Upc_present_list AS (
+        SELECT 
+            a.job_number,
+            a.zip,
+            a.extra1,
+            STRING_AGG(a.upc, '','') AS Upcs_present 
+        FROM 
+            ' + QUOTENAME(@backup_table_date_1) + ' a 
+        JOIN 
+            ' + @clientupc_table + ' AS b ON a.upc = b.upc 
+        WHERE 
+            a.upc = b.upc
+        GROUP BY 
+            a.job_number, a.zip,a.extra1
+    )
+    SELECT 
+        Upc_present_not_present.Job_number,
+        Upc_present_not_present.zip,
+        Upc_present_not_present.Present,
+        ISNULL(CONVERT(VARCHAR, Upc_previous_file.Upcs_previous_file), ''#N/A'') AS Upcs_previous_file,
+        FORMAT(CASE 
+                    WHEN Upc_previous_file.Upcs_previous_file = 0 THEN ''#N/A''
+                    ELSE ((Upc_present_not_present.Present - Upc_previous_file.Upcs_previous_file) * 100.0 / Upc_previous_file.Upcs_previous_file)
+                END, ''0.00'') + ''%'' AS Variation,
+        ISNULL(CONVERT(VARCHAR, Upc_present_not_present.Not_present), ''#N/A'') AS Not_present,
+        COALESCE(Upc_not_present_list.Upcs_not_present, '''') AS Upcs_not_present,
+        COALESCE(Upc_present_list.Upcs_present, '''') AS Upcs_present
+    FROM 
+        Upc_present_not_present 
+    LEFT JOIN
+        Upc_not_present_list ON Upc_present_not_present.Job_number = Upc_not_present_list.Job_number AND Upc_present_not_present.zip = Upc_not_present_list.zip AND Upc_present_not_present.extra1 = Upc_not_present_list.extra1
+    LEFT JOIN
+        Upc_previous_file ON  Upc_present_not_present.zip = Upc_previous_file.zip AND Upc_present_not_present.extra1 = Upc_previous_file.extra1
+    LEFT JOIN
+        Upc_present_list ON Upc_present_not_present.job_number = Upc_present_list.job_number AND Upc_present_not_present.zip = Upc_present_list.zip AND Upc_present_not_present.extra1 = Upc_present_list.extra1
+    ORDER BY 
+        Variation DESC ;';
+
+    EXEC sp_executesql @sql;
+END;
+
+
+EXEC QA_directed_list_scrapes 'Client_18_UPC_Meijer', 'Backup_Meijer_UPC_03_17_2024', 'Backup_Meijer_UPC_03_10_2024';
